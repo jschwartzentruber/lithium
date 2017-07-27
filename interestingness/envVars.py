@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring
 #
@@ -15,7 +14,7 @@ isLinux = (platform.system() == "Linux")
 isMac = (platform.system() == "Darwin")
 isWin = (platform.system() == "Windows")
 
-ENV_PATH_SEPARATOR = ";" if os.name == "nt" else ":"
+ENV_PATH_SEPARATOR = ";" if isWin else ":"
 
 
 def envWithPath(path, runningEnv=None):

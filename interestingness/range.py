@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name
 #
@@ -32,14 +31,9 @@ Use for:
 
 from __future__ import print_function
 
-import os
-import sys
 from optparse import OptionParser  # pylint: disable=deprecated-module
 
-path0 = os.path.dirname(os.path.abspath(__file__))
-path1 = os.path.abspath(os.path.join(path0, os.pardir, 'util'))
-sys.path.append(path1)
-import ximport  # noqa  pylint: disable=relative-import,wrong-import-position
+from ..utils import ximport  # noqa  pylint: disable=relative-import,wrong-import-position
 
 
 def parseOptions(arguments):  # pylint: disable=missing-docstring
@@ -50,20 +44,30 @@ def parseOptions(arguments):  # pylint: disable=missing-docstring
     return int(args[0]), int(args[1]), args[2:]  # args[0] is minLoopNum, args[1] maxLoopNum
 
 
-def interesting(cliArgs, tempPrefix):  # pylint: disable=missing-docstring
-    (rangeMin, rangeMax, arguments) = parseOptions(cliArgs)
-    conditionScript = ximport.importRelativeOrAbsolute(arguments[0])
-    conditionArgs = arguments[1:]
+class Range(object):
 
-    if hasattr(conditionScript, "init"):
-        conditionScript.init(conditionArgs)
+    def __init__(self, interesting_script=False):
+        if interesting_script:
+            global interesting  # pylint: disable=global-variable-undefined, invalid-name
+            interesting = self.interesting
 
-    assert (rangeMax - rangeMin) >= 0
-    for i in range(rangeMin, rangeMax + 1):
-        # This doesn't do anything if RANGENUM is not found.
-        replacedConditionArgs = [s.replace("RANGENUM", str(i)) for s in conditionArgs]
-        print("Range number %d:" % i, end=" ")
-        if conditionScript.interesting(replacedConditionArgs, tempPrefix):
-            return True
+    def interesting(self, cliArgs, tempPrefix):  # pylint: disable=missing-docstring
+        (rangeMin, rangeMax, arguments) = parseOptions(cliArgs)
+        conditionScript = ximport(arguments[0])
+        conditionArgs = arguments[1:]
 
-    return False
+        if hasattr(conditionScript, "init"):
+            conditionScript.init(conditionArgs)
+
+        assert (rangeMax - rangeMin) >= 0
+        for i in range(rangeMin, rangeMax + 1):
+            # This doesn't do anything if RANGENUM is not found.
+            replacedConditionArgs = [s.replace("RANGENUM", str(i)) for s in conditionArgs]
+            print("Range number %d:" % i, end=" ")
+            if conditionScript.interesting(replacedConditionArgs, tempPrefix):
+                return True
+
+        return False
+
+
+Range(True)

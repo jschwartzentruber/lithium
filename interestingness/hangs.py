@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring
 #
@@ -8,16 +7,26 @@
 
 from __future__ import print_function
 
-import timedRun  # pylint: disable=relative-import
+from . import timedRun
 
 
-def interesting(args, tempPrefix):
-    timeout = int(args[0])
+class Hangs(object):
 
-    runinfo = timedRun.timed_run(args[1:], timeout, tempPrefix)
+    def __init__(self, interesting_script=False):
+        if interesting_script:
+            global interesting  # pylint: disable=global-variable-undefined, invalid-name
+            interesting = self.interesting
 
-    if runinfo.sta == timedRun.TIMED_OUT:
-        return True
+    def interesting(self, args, tempPrefix):
+        timeout = int(args[0])
 
-    print("Exited in %.3f seconds" % runinfo.elapsedtime)
-    return False
+        runinfo = timedRun.timed_run(args[1:], timeout, tempPrefix)
+
+        if runinfo.sta == timedRun.TIMED_OUT:
+            return True
+
+        print("Exited in %.3f seconds" % runinfo.elapsedtime)
+        return False
+
+
+Hangs(True)

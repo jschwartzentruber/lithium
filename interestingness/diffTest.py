@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring
 #
@@ -19,7 +18,7 @@ from __future__ import print_function
 import filecmp
 from optparse import OptionParser  # pylint: disable=deprecated-module
 
-import timedRun  # pylint: disable=relative-import
+from . import timedRun
 
 
 def parseOptions(arguments):

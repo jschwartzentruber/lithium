@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring,too-many-lines,too-many-statements
 #
@@ -1241,9 +1240,9 @@ class Lithium(object):  # pylint: disable=too-many-instance-attributes
         self.testcase.readTestcase(testcaseFilename)
 
         sys.path.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir, "interestingness"))
-        import ximport  # pylint: disable=import-error
+        from .utils import ximport  # pylint: disable=import-error
 
-        self.conditionScript = ximport.importRelativeOrAbsolute(extra_args[0])
+        self.conditionScript = ximport(extra_args[0])
         self.conditionArgs = extra_args[1:]
 
     def testcaseTempFilename(self, partialFilename, useNumber=True):

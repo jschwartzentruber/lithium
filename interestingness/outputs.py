@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring
 #
@@ -10,8 +9,7 @@ from __future__ import print_function
 
 from optparse import OptionParser  # pylint: disable=deprecated-module
 
-import fileIngredients  # pylint: disable=relative-import
-import timedRun  # pylint: disable=relative-import
+from . import fileIngredients, timedRun
 
 
 def parseOptions(arguments):
@@ -28,18 +26,28 @@ def parseOptions(arguments):
     return options.condTimeout, options.useRegex, args
 
 
-def interesting(cliArgs, tempPrefix):
-    (timeout, regexEnabled, args) = parseOptions(cliArgs)
+class Outputs(object):
 
-    searchFor = args[0]
+    def __init__(self, interesting_script=False):
+        if interesting_script:
+            global interesting  # pylint: disable=global-variable-undefined, invalid-name
+            interesting = self.interesting
 
-    runinfo = timedRun.timed_run(args[1:], timeout, tempPrefix)
+    def interesting(self, cliArgs, tempPrefix):
+        (timeout, regexEnabled, args) = parseOptions(cliArgs)
 
-    result = (
-        fileIngredients.fileContains(tempPrefix + "-out.txt", searchFor, regexEnabled)[0] or
-        fileIngredients.fileContains(tempPrefix + "-err.txt", searchFor, regexEnabled)[0]
-    )
+        searchFor = args[0]
 
-    print("Exit status: %s (%.3f seconds)" % (runinfo.msg, runinfo.elapsedtime))
+        runinfo = timedRun.timed_run(args[1:], timeout, tempPrefix)
 
-    return result
+        result = (
+            fileIngredients.fileContains(tempPrefix + "-out.txt", searchFor, regexEnabled)[0] or
+            fileIngredients.fileContains(tempPrefix + "-err.txt", searchFor, regexEnabled)[0]
+        )
+
+        print("Exit status: %s (%.3f seconds)" % (runinfo.msg, runinfo.elapsedtime))
+
+        return result
+
+
+Outputs(True)

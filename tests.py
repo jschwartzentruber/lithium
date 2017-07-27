@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring,too-few-public-methods
 #
@@ -12,11 +11,16 @@ import math
 import os
 import random
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+if sys.version_info.major == 2:
+    import virtualenv
+else:
+    import venv
 
-import lithium  # pylint: disable=relative-import
+import lithium
 
 log = logging.getLogger("lithium_test")
 logging.basicConfig(level=logging.DEBUG)
@@ -289,7 +293,7 @@ class LithiumTests(TestCase):
         self.assertIn("INFO:lithium:The file has 0 lines so there's nothing for Lithium to try to remove!", logs.output)
 
     def test_arithmetic(self):
-        path = os.path.join(os.path.dirname(__file__), "examples", "arithmetic")
+        path = os.path.join(os.path.dirname(__file__), "doc", "examples", "arithmetic")
         shutil.copyfile(os.path.join(path, "11.txt"), "11.txt")
         result = lithium.Lithium().main([os.path.join(path, "product_divides.py"), "35", "11.txt"])
         self.assertEqual(result, 0)
@@ -555,3 +559,51 @@ class TestcaseTests(TestCase):
         with self.assertRaisesRegex(lithium.LithiumError,
                                     r"^The testcase \(a\.txt\) has a line containing 'DDBEGIN' but no"):
             t.readTestcase("a.txt")
+
+
+class SetupTests(TestCase):
+
+    def test_installed(self):
+        "lithium module tests"
+        log.info("creating virtualenv")
+        if sys.version_info.major == 2:
+            subprocess.check_call([sys.executable, "-m", "virtualenv", "testenv"])
+        else:
+            venv.create("testenv", system_site_packages=True)
+        python_exe = os.path.join("testenv", "bin", "python")
+        lithium_exe = os.path.join("testenv", "bin", "lithium")
+        log.info("installing lithium in virtualenv")
+        subprocess.check_call([python_exe, os.path.join(os.path.dirname(__file__), "setup.py"), "install"])
+        log.info("running lithium -h in virtualenv")
+        subprocess.check_call([lithium_exe, "-h"])
+
+        log.info("importing lithium in virtualenv")
+        subprocess.check_call([python_exe, "-c", "import lithium;import lithium.interestingness"])
+
+        log.info("running lithium w/ builtin interestingness test: outputs")
+        with open("temp.js", "w"):
+            pass
+        list_exe = "dir" if sys.platform.startswith("win") else "ls"
+        subprocess.check_call([lithium_exe, "outputs", "--timeout=2", "temp.js", list_exe, "temp.js"])
+
+        log.info("running lithium w/ builtin interestingness test: crashes")
+        sp = subprocess.Popen([lithium_exe, "crashes", "--timeout=2", list_exe, "temp.js"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        stdout, _ = sp.communicate()
+        self.assertEqual(sp.wait(), 1)
+        self.assertRegex(r"error: XXX", stdout)
+
+        log.info("running lithium w/ builtin interestingness test: range crashes")
+        subprocess.check_call([lithium_exe, "range", "1", "2", "crashes", "--timeout=2", list_exe, "temp.js"])
+        # XXX
+
+        log.info("running lithium w/ builtin interestingness test: hangs")
+        subprocess.check_call([lithium_exe, "hangs", "3", list_exe, "temp.js"])
+        # XXX
+
+        log.info("running lithium w/ builtin interestingness test: range hangs")
+        subprocess.check_call([lithium_exe, "range", "1", "2", "hangs", "3", list_exe, "temp.js"])
+        # XXX
+
+        # run a subset of tests to make sure lithium works in the virtualenv
+        subprocess.check_call([python_exe, "-m", "pytest", "lithium.tests::LithiumTests"])
+        # XXX

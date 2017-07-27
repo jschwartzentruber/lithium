@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring
 #
@@ -14,10 +13,7 @@ import subprocess
 import sys
 import time
 
-path0 = os.path.dirname(os.path.abspath(__file__))
-path1 = os.path.abspath(os.path.join(path0, os.pardir, 'interestingness'))
-sys.path.append(path1)
-import envVars  # noqa  pylint: disable=relative-import,wrong-import-position
+from . import envVars
 
 ASAN_EXIT_CODE = 77
 

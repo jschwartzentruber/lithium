@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # coding=utf-8
 # pylint: disable=invalid-name,missing-docstring
 #
@@ -9,8 +8,7 @@
 from __future__ import print_function
 from optparse import OptionParser  # pylint: disable=deprecated-module
 
-import timedRun  # pylint: disable=relative-import
-
+from . import timedRun
 
 def parseOptions(arguments):
     parser = OptionParser()
@@ -24,14 +22,24 @@ def parseOptions(arguments):
     return options.condTimeout, args
 
 
-def interesting(cliArgs, tempPrefix):
-    (timeout, args) = parseOptions(cliArgs)
+class Crashes(object):
 
-    runinfo = timedRun.timed_run(args, timeout, tempPrefix)
-    timeString = " (%.3f seconds)" % runinfo.elapsedtime
-    if runinfo.sta == timedRun.CRASHED:
-        print("Exit status: " + runinfo.msg + timeString)
-        return True
+    def __init__(self, interesting_script=False):
+        if interesting_script:
+            global interesting  # pylint: disable=global-variable-undefined, invalid-name
+            interesting = self.interesting
 
-    print("[Uninteresting] It didn't crash." + timeString)
-    return False
+    def interesting(self, cliArgs, tempPrefix):
+        (timeout, args) = parseOptions(cliArgs)
+
+        runinfo = timedRun.timed_run(args, timeout, tempPrefix)
+        timeString = " (%.3f seconds)" % runinfo.elapsedtime
+        if runinfo.sta == timedRun.CRASHED:
+            print("Exit status: " + runinfo.msg + timeString)
+            return True
+
+        print("[Uninteresting] It didn't crash." + timeString)
+        return False
+
+
+Crashes(True)

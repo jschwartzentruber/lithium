@@ -7,6 +7,7 @@
 
 from __future__ import print_function
 
+import sys
 from optparse import OptionParser  # pylint: disable=deprecated-module
 
 from . import fileIngredients, timedRun
@@ -37,6 +38,8 @@ class Outputs(object):
         (timeout, regexEnabled, args) = parseOptions(cliArgs)
 
         searchFor = args[0]
+        if not isinstance(searchFor, bytes):
+            searchFor = searchFor.encode(sys.getfilesystemencoding())
 
         runinfo = timedRun.timed_run(args[1:], timeout, tempPrefix)
 

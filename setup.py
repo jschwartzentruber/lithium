@@ -21,8 +21,8 @@ if __name__ == "__main__":
           packages=["lithium", "lithium.interestingness"],
           package_data={"": [
               "doc/*",
-              "examples/*.*",
-              "examples/arithmetic/*"
+              "doc/examples/*.*",
+              "doc/examples/arithmetic/*"
           ]},
           package_dir={"lithium": CWD},
           zip_safe=False)

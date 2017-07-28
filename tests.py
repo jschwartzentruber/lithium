@@ -565,9 +565,10 @@ class SetupTests(TestCase):
 
     def test_installed(self):
         "lithium module tests"
+        # these could all be separate tests with the venv created in setUp... but venv creation is really slow in py2
         log.info("creating virtualenv")
         if sys.version_info.major == 2:
-            subprocess.check_call([sys.executable, "-m", "virtualenv", "testenv"])
+            subprocess.check_call([sys.executable, "-m", "virtualenv", "--system-site-packages", "testenv"])
         else:
             venv.create("testenv", system_site_packages=True)
         python_exe = os.path.join("testenv", "bin", "python")
@@ -587,23 +588,39 @@ class SetupTests(TestCase):
         subprocess.check_call([lithium_exe, "outputs", "--timeout=2", "temp.js", list_exe, "temp.js"])
 
         log.info("running lithium w/ builtin interestingness test: crashes")
-        sp = subprocess.Popen([lithium_exe, "crashes", "--timeout=2", list_exe, "temp.js"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        sp = subprocess.Popen([lithium_exe, "crashes", "--timeout=2", list_exe, "temp.js"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         stdout, _ = sp.communicate()
+        print(stdout)
         self.assertEqual(sp.wait(), 1)
-        self.assertRegex(r"error: XXX", stdout)
+        self.assertRegex(stdout, br"the original testcase is not 'interesting'")
 
         log.info("running lithium w/ builtin interestingness test: range crashes")
-        subprocess.check_call([lithium_exe, "range", "1", "2", "crashes", "--timeout=2", list_exe, "temp.js"])
-        # XXX
+        sp = subprocess.Popen([lithium_exe, "range", "1", "2", "crashes", "--timeout=2", list_exe, "temp.js"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        stdout, _ = sp.communicate()
+        print(stdout)
+        self.assertEqual(sp.wait(), 1)
+        self.assertRegex(stdout, br"the original testcase is not 'interesting'")
 
         log.info("running lithium w/ builtin interestingness test: hangs")
-        subprocess.check_call([lithium_exe, "hangs", "3", list_exe, "temp.js"])
-        # XXX
+        sp = subprocess.Popen([lithium_exe, "hangs", "3", list_exe, "temp.js"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        stdout, _ = sp.communicate()
+        print(stdout)
+        self.assertEqual(sp.wait(), 1)
+        self.assertRegex(stdout, br"the original testcase is not 'interesting'")
 
         log.info("running lithium w/ builtin interestingness test: range hangs")
-        subprocess.check_call([lithium_exe, "range", "1", "2", "hangs", "3", list_exe, "temp.js"])
-        # XXX
+        sp = subprocess.Popen([lithium_exe, "range", "1", "2", "hangs", "3", list_exe, "temp.js"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        stdout, _ = sp.communicate()
+        print(stdout)
+        self.assertEqual(sp.wait(), 1)
+        self.assertRegex(stdout, br"the original testcase is not 'interesting'")
 
         # run a subset of tests to make sure lithium works in the virtualenv
-        subprocess.check_call([python_exe, "-m", "pytest", "lithium.tests::LithiumTests"])
-        # XXX
+        log.info("re-running some lithium tests in virtualenv")
+        path = subprocess.check_output([python_exe, "-c", "import lithium;print(lithium.__file__)"])
+        test_path = os.path.join(os.path.dirname(path.decode(sys.getfilesystemencoding())), "tests.py")
+        subprocess.check_call([python_exe, "-m", "pytest", test_path + "::LithiumTests"])

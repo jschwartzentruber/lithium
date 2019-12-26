@@ -10,10 +10,20 @@
 import argparse
 import logging
 import os
+import multiprocessing
+import platform
 import re
+import sys
+import tempfile
+import threading
 import time
 
 from .interestingness.utils import rel_or_abs_import
+
+if sys.version_info[0] == 3:
+    import queue
+else:
+    import Queue as queue
 
 log = logging.getLogger("lithium")  # pylint: disable=invalid-name
 
@@ -277,6 +287,285 @@ class CheckOnly(Strategy):  # pylint: disable=missing-docstring
         r = interesting(testcase, writeIt=False)  # pylint: disable=invalid-name
         log.info("Lithium result: %s", ("interesting." if r else "not interesting."))
         return int(not r)
+
+
+class HalfEmpty(Strategy):
+    """Parallel minimization strategy based on https://github.com/googleprojectzero/halfempty
+
+    Interestingness scripts using this must be callable in parallel.
+
+    This strategy works using bisection, but it sees the bisection as a decision tree
+    where each branch indicates removal/non-removal of a chunk. Since reduction is
+    mostly characterized by sequential non-removals, it will execute those
+    speculatively in parallel.
+    """
+    name = "half-empty"
+    load_check_period = 120
+    thread_check_period = 5
+
+    def __init__(self):
+        self.max_workers = None
+        self.target_load = None
+
+    def addArgs(self, parser):
+        grp_add = parser.add_argument_group(description="Additional options for the %s strategy" % self.name)
+        # TODO: most of the Minimize options could apply here too.
+        grp_add.add_argument(
+            "--target-load",
+            type=int,
+            help="Target load average to scale workers (0 to disable scaling)",
+            default=0 if platform.system == "Windows" else multiprocessing.cpu_count(),
+        )
+        grp_add.add_argument(
+            "--max-workers",
+            type=int,
+            help="Maximum number of parallel workers to use. (0 to disable limit)",
+            default=0,
+        )
+
+    def processArgs(self, parser, args):
+        if args.max_workers < 0:
+            parser.error("--max-workers must be positive")
+        if args.target_load < 0:
+            parser.error("--target-load must be positive")
+        if args.max_workers:
+            self.max_workers = args.max_workers
+        else:
+            self.max_workers = None
+        if args.target_load:
+            if platform.system() == "Windows":
+                log.warning("--target-load only works on unix")
+                self.target_load = None
+            else:
+                self.target_load = args.target_load
+        else:
+            self.target_load = None
+        if self.target_load is None and self.max_workers is None:
+            log.warning(
+                "Neither --target-load nor --max-workers is specified, "
+                "only one worker will be used"
+            )
+            self.max_workers = 1
+
+    def _monitor(self, exit_evt, clear_evt, work_queue, result_queue, interesting):
+        """Launch workers if needed.
+        """
+        log.info(
+            "Starting load monitor. Target load is %r, max workers is %r",
+            self.target_load,
+            self.max_workers,
+        )
+        workers = []
+        try:
+            next_load_check = time.time() + self.load_check_period
+            last_worker_add = 0
+            while not exit_evt.is_set():
+                now = time.time()
+                can_add_workers = (
+                    (self.max_workers is None or len(workers) < self.max_workers)
+                    # use 60 seconds since that's the minimum period for load averages
+                    # to register a change
+                    and (now - last_worker_add) >= 60
+                )
+                if self.target_load is None or not workers:
+                    need_workers = True
+                elif now >= next_load_check:
+                    loadavg = os.getloadavg()
+                    # check if adding one more worker would exceed our target load
+                    if (now - last_worker_add) < 5 * 60:
+                        current_load = loadavg[0]  # use 1-minute average
+                    elif (now - last_worker_add) < 15 * 60:
+                        current_load = loadavg[1]  # use 5-minute average
+                    else:
+                        current_load = loadavg[2]  # use 15-minute average
+                    load_per_worker = current_load / len(workers)
+                    next_worker_load = (len(workers) + 1) * load_per_worker
+                    need_workers = next_worker_load <= self.target_load
+                    next_load_check = time.time() + self.load_check_period
+                    log.info("Current load: %r, need workers? %r", loadavg, need_workers)
+                else:
+                    need_workers = False
+                if can_add_workers and need_workers:
+                    log.info("Adding a worker...")
+                    # add worker
+                    workers.append(
+                        threading.Thread(
+                            target=self._worker,
+                            args=(
+                                exit_evt,
+                                clear_evt,
+                                work_queue,
+                                result_queue,
+                                interesting,
+                            ),
+                        )
+                    )
+                    workers[-1].start()
+                    last_worker_add = time.time()
+                time.sleep(self.thread_check_period)
+        except:  # noqa pylint: disable=bare-except
+            exit_evt.set()
+            raise
+        finally:
+            log.info("Waiting for workers...")
+            for worker in workers:
+                worker.join()
+
+    def _worker(self, exit_evt, clear_evt, work_queue, result_queue, interesting):
+        while True:
+            if exit_evt.is_set() and not clear_evt.is_set():
+                # don't break if clear_evt is set, or we could deadlock the main thread
+                # the work queue must be cleared first
+                break
+            try:
+                work = work_queue.get(timeout=self.thread_check_period)
+            except queue.Empty:
+                continue
+            if clear_evt.is_set():
+                # clear_evt should just drain the work queue.
+                work_queue.task_done()
+                continue
+            if work is None:
+                # reduction is finished. pass the sentinal to the result queue
+                result_queue.put(None)
+                work_queue.task_done()
+                continue
+            try:
+                testcase, chunk_to_try = work
+                test_to_try, next_chunk = self._remove_chunk(testcase, chunk_to_try)
+                if interesting(test_to_try):
+                    log.info("Chunk %r removal was interesting", chunk_to_try)
+                    result_queue.put((test_to_try, next_chunk))
+                else:
+                    result_queue.put((testcase, next_chunk))
+            except:  # noqa pylint: disable=bare-except
+                exit_evt.set()
+                raise
+            finally:
+                work_queue.task_done()
+
+    @staticmethod
+    def _remove_chunk(testcase, chunk_iter):
+        """Remove the given chunk from a testcase.
+
+        Args:
+            testcase (TestCase): Input testcase
+            chunk_iter (object): Current chunk iterator
+
+        Returns:
+            (testcase, chunk_iter): Modified testcase (copy) and next value of
+                                    chunk_iter for `_iter_chunks()`
+        """
+        chunk_size, chunk_end = chunk_iter
+        chunk_start = max(0, chunk_end - chunk_size)
+        result = testcase.copy()
+        result.parts = result.parts[:chunk_start] + result.parts[chunk_end:]
+        return result, (chunk_size, chunk_start)
+
+    @staticmethod
+    def _iter_chunks(testcase, chunk_iter):
+        """Return an iteration of chunk_size/chunk_number which are given as args to
+        `remove_chunk()` to perform reduction.
+
+        Any removal will invalidate this sequence.
+
+        Args:
+            testcase (TestCase): Input testcase
+            chunk_iter (object): Current chunk iterator (or None to start)
+
+        Returns:
+            generator of chunk_iter objects
+        """
+        if chunk_iter is None:
+            chunk_size = largestPowerOfTwoSmallerThan(len(testcase))
+            chunk_end = len(testcase)
+        else:
+            chunk_size, chunk_end = chunk_iter
+
+        while True:
+            if chunk_end - chunk_size < 0:
+                # If the testcase is empty, end minimization
+                if not testcase.parts:
+                    break
+
+                # If the chunk_size is less than or equal to the min_chunk_size and...
+                if chunk_size <= 1:
+                    break
+
+                # If none of the conditions apply, reduce the chunk_size and continue
+                chunk_end = len(testcase)
+                while chunk_size > 1:  # smallest valid chunk size is 1
+                    chunk_size >>= 1
+                    # To avoid testing with an empty testcase (wasting cycles) only break when
+                    # chunkSize is less than the number of testcase parts available.
+                    if chunk_size < len(testcase):
+                        break
+
+            yield (chunk_size, chunk_end)
+
+            # Decrement chunk_size
+            # To ensure the file is fully reduced, decrement chunk_end by 1 when chunk_size <= 2
+            if chunk_size <= 2:
+                chunk_end -= 1
+            else:
+                chunk_end -= chunk_size
+
+    def _fill_queue(self, work_queue, testcase, current_chunk):
+        # fill the queue with work, assuming every reduction will fail
+        for chunk in self._iter_chunks(testcase, current_chunk):
+            # testcase is a single object, it isn't copied in the queue
+            work_queue.put((testcase, chunk))
+        # add a sentinal item to signal that reduction is complete
+        work_queue.put(None)
+
+    def main(self, testcase, interesting, temp_filename):
+        work_queue = queue.Queue()
+        result_queue = queue.Queue()
+        exit_evt = threading.Event()
+        clear_evt = threading.Event()
+
+        monitor = threading.Thread(
+            target=self._monitor,
+            args=(
+                exit_evt,
+                clear_evt,
+                work_queue,
+                result_queue,
+                interesting,
+            ),
+        )
+        monitor.start()
+        try:
+            self._fill_queue(work_queue, testcase, None)
+            while True:
+                if exit_evt.is_set():
+                    break
+                try:
+                    result = result_queue.get(timeout=self.thread_check_period)
+                    if result is None:
+                        log.info("reduction finished")
+                        # reduction is finished!
+                        return 0
+                    test_tried, next_chunk = result
+                    if test_tried is not testcase:
+                        log.info("Removing the chunk and resetting work queue")
+                        # wow, it worked!
+                        clear_evt.set()
+                        work_queue.join()
+                        try:
+                            result_queue.get_nowait()
+                        except queue.Empty:
+                            pass
+                        # remove the chunk for real
+                        testcase = test_tried
+                        # re-fill the queue
+                        self._fill_queue(work_queue, testcase, next_chunk)
+                except queue.Empty:
+                    continue
+        finally:
+            exit_evt.set()
+            monitor.join()
+        return 1
 
 
 class Minimize(Strategy):
@@ -1288,6 +1577,10 @@ class Lithium(object):  # pylint: disable=missing-docstring,too-many-instance-at
 
         self.tempFileCount = 1  # pylint: disable=invalid-name
 
+        self.unique = False
+
+        self.testcaseLock = threading.RLock()
+
     def main(self, args=None):  # pylint: disable=missing-docstring,missing-return-doc,missing-return-type-doc
         logging.basicConfig(format="%(message)s", level=logging.INFO)
         self.processArgs(args)
@@ -1401,6 +1694,10 @@ class Lithium(object):  # pylint: disable=missing-docstring,too-many-instance-at
             default=self.strategy.name,  # this has already been parsed above, it's only here for the help message
             choices=strategies.keys(),
             help="reduction strategy to use. default: %s" % defaultStrategy)
+        grp_opt.add_argument(
+            "--unique", "-u",
+            action="store_true",
+            help="use a unique filename per-iteration (required for parallel reduction)")
         self.strategy.addArgs(parser)
         grp_ext = parser.add_argument_group(description="Condition, condition options and file-to-reduce")
         grp_ext.add_argument(
@@ -1428,6 +1725,14 @@ class Lithium(object):  # pylint: disable=missing-docstring,too-many-instance-at
             testcaseFilename = extra_args[-1]  # pylint: disable=invalid-name
         else:
             parser.error("No testcase specified (use --testcase or last condition arg)")
+
+        if args.unique:
+            if args.testcase:
+                parser.error("--unique and --testcase are not supported together")
+            self.unique = True
+        else:
+            self.unique = False
+
         self.testcase = testcaseTypes[atom]()
         if args.symbol:
             self.testcase.cutBefore = args.cutBefore
@@ -1440,14 +1745,16 @@ class Lithium(object):  # pylint: disable=missing-docstring,too-many-instance-at
     def testcaseTempFilename(self, partialFilename, useNumber=True):  # pylint: disable=invalid-name,missing-docstring
         # pylint: disable=missing-return-doc,missing-return-type-doc
         if useNumber:
-            partialFilename = "%d-%s" % (self.tempFileCount, partialFilename)
-            self.tempFileCount += 1
+            with self.testcaseLock:
+                partialFilename = "%d-%s" % (self.tempFileCount, partialFilename)
+                self.tempFileCount += 1
         return os.path.join(self.tempDir, partialFilename + self.testcase.extension)
 
     def createTempDir(self):  # pylint: disable=invalid-name,missing-docstring
         i = 1
         while True:
-            self.tempDir = "tmp%d" % i
+            with self.testcaseLock:
+                self.tempDir = "tmp%d" % i
             # To avoid race conditions, we use try/except instead of exists/create
             # Hopefully we don't get any errors other than "File exists" :)
             try:
@@ -1459,14 +1766,28 @@ class Lithium(object):  # pylint: disable=missing-docstring,too-many-instance-at
     # If the file is still interesting after the change, changes "parts" and returns True.
     def interesting(self, testcaseSuggestion, writeIt=True):  # pylint: disable=invalid-name,missing-docstring
         # pylint: disable=missing-return-doc,missing-return-type-doc
+        args = self.conditionArgs[:]
         if writeIt:
-            testcaseSuggestion.writeTestcase()
+            if self.unique:
+                base = os.path.splitext(os.path.basename(self.testcase.filename))[0]
+                path = os.path.dirname(self.testcase.filename)
+                hnd, filename = tempfile.mkstemp(suffix=self.testcase.extension, prefix=base, dir=path)
+                os.close(hnd)
+                args[-1] = filename
+            else:
+                filename = None
+            testcaseSuggestion.writeTestcase(filename=filename)
 
-        self.testCount += 1
-        self.testTotal += len(testcaseSuggestion.parts)
+        with self.testcaseLock:
+            self.testCount += 1
+            self.testTotal += len(testcaseSuggestion.parts)
 
-        tempPrefix = os.path.join(self.tempDir, "%d" % self.tempFileCount)  # pylint: disable=invalid-name
-        inter = self.conditionScript.interesting(self.conditionArgs, tempPrefix)
+            tempPrefix = os.path.join(self.tempDir, "%d" % self.tempFileCount)  # pylint: disable=invalid-name
+
+        inter = self.conditionScript.interesting(args, tempPrefix)
+
+        if writeIt and self.unique:
+            os.unlink(filename)
 
         # Save an extra copy of the file inside the temp directory.
         # This is useful if you're reducing an assertion and encounter a crash:
@@ -1476,8 +1797,9 @@ class Lithium(object):  # pylint: disable=missing-docstring,too-many-instance-at
             testcaseSuggestion.writeTestcase(self.testcaseTempFilename(tempFileTag))
 
         if inter:
-            self.testcase = testcaseSuggestion
-            self.lastInteresting = self.testcase
+            with self.testcaseLock:
+                self.testcase = testcaseSuggestion
+                self.lastInteresting = self.testcase
 
         return inter
 

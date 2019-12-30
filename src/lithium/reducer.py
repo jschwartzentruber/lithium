@@ -305,6 +305,7 @@ class HalfEmpty(Strategy):
     thread_check_period = 5
 
     def __init__(self):
+        self.initial_workers = None
         self.max_workers = None
         self.target_load = None
 
@@ -325,12 +326,21 @@ class HalfEmpty(Strategy):
             help="Maximum number of parallel workers to use. (0 to disable limit)",
             default=0,
         )
+        grp_add.add_argument(
+            "--initial-workers",
+            type=int,
+            help="Initial number of workers to use.",
+            default=1,
+        )
 
     def processArgs(self, parser, args):
         if args.max_workers < 0:
             parser.error("--max-workers must be positive")
         if args.target_load < 0:
             parser.error("--target-load must be positive")
+        if args.initial_workers <= 0:
+            parser.error("--initial-workers must be at least 1")
+        self.initial_workers = args.initial_workers
         if args.max_workers:
             self.max_workers = args.max_workers
         else:
@@ -346,9 +356,10 @@ class HalfEmpty(Strategy):
         if self.target_load is None and self.max_workers is None:
             log.warning(
                 "Neither --target-load nor --max-workers is specified, "
-                "only one worker will be used"
+                "%d workers will be used.",
+                args.initial_workers
             )
-            self.max_workers = 1
+            self.max_workers = args.initial_workers
 
     def _monitor(self, exit_evt, clear_evt, work_queue, result_queue, interesting):
         """Launch workers if needed.
@@ -370,7 +381,7 @@ class HalfEmpty(Strategy):
                     # to register a change
                     and (now - last_worker_add) >= 60
                 )
-                if self.target_load is None or not workers:
+                if self.target_load is None or len(workers) < self.initial_workers:
                     need_workers = True
                 elif now >= next_load_check:
                     loadavg = os.getloadavg()
@@ -406,7 +417,7 @@ class HalfEmpty(Strategy):
                             ),
                         )
                     )
-                    log.info("Adding a worker... (#%d)", len(workers))
+                    log.info("Adding worker #%d...", len(workers))
                     workers[-1].start()
                     last_worker_add = time.time()
                 time.sleep(self.thread_check_period)

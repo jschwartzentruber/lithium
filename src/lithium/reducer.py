@@ -290,7 +290,8 @@ class CheckOnly(Strategy):  # pylint: disable=missing-docstring
 
 
 class HalfEmpty(Strategy):
-    """Parallel minimization strategy based on https://github.com/googleprojectzero/halfempty
+    """Parallel minimization strategy based on
+    https://github.com/googleprojectzero/halfempty
 
     Interestingness scripts using this must be callable in parallel.
 
@@ -300,7 +301,7 @@ class HalfEmpty(Strategy):
     speculatively in parallel.
     """
     name = "half-empty"
-    load_check_period = 120
+    load_check_period = 30
     thread_check_period = 5
 
     def __init__(self):
@@ -308,7 +309,9 @@ class HalfEmpty(Strategy):
         self.target_load = None
 
     def addArgs(self, parser):
-        grp_add = parser.add_argument_group(description="Additional options for the %s strategy" % self.name)
+        grp_add = parser.add_argument_group(
+            description="Additional options for the %s strategy" % (self.name,),
+        )
         # TODO: most of the Minimize options could apply here too.
         grp_add.add_argument(
             "--target-load",
@@ -378,15 +381,18 @@ class HalfEmpty(Strategy):
                         current_load = loadavg[1]  # use 5-minute average
                     else:
                         current_load = loadavg[2]  # use 15-minute average
-                    load_per_worker = current_load / len(workers)
+                    load_per_worker = float(current_load) / len(workers)
                     next_worker_load = (len(workers) + 1) * load_per_worker
                     need_workers = next_worker_load <= self.target_load
                     next_load_check = time.time() + self.load_check_period
-                    log.info("Current load: %r, need workers? %r", loadavg, need_workers)
+                    log.info(
+                        "Current load: %r (%0.1f/worker)",
+                        loadavg,
+                        load_per_worker,
+                    )
                 else:
                     need_workers = False
                 if can_add_workers and need_workers:
-                    log.info("Adding a worker...")
                     # add worker
                     workers.append(
                         threading.Thread(
@@ -400,6 +406,7 @@ class HalfEmpty(Strategy):
                             ),
                         )
                     )
+                    log.info("Adding a worker... (#%d)", len(workers))
                     workers[-1].start()
                     last_worker_add = time.time()
                 time.sleep(self.thread_check_period)
@@ -418,26 +425,23 @@ class HalfEmpty(Strategy):
                 # the work queue must be cleared first
                 break
             try:
-                work = work_queue.get(timeout=self.thread_check_period)
+                testcase, chunk_to_try = work_queue.get(
+                    timeout=self.thread_check_period,
+                )
             except queue.Empty:
                 continue
             if clear_evt.is_set():
                 # clear_evt should just drain the work queue.
                 work_queue.task_done()
                 continue
-            if work is None:
-                # reduction is finished. pass the sentinal to the result queue
-                result_queue.put(None)
-                work_queue.task_done()
-                continue
             try:
-                testcase, chunk_to_try = work
                 test_to_try, next_chunk = self._remove_chunk(testcase, chunk_to_try)
                 if interesting(test_to_try):
-                    log.info("Chunk %r removal was interesting", chunk_to_try)
-                    result_queue.put((test_to_try, next_chunk))
+                    if not exit_evt.is_set():
+                        clear_evt.set()
+                    result_queue.put((test_to_try, chunk_to_try, next_chunk))
                 else:
-                    result_queue.put((testcase, next_chunk))
+                    result_queue.put((testcase, chunk_to_try, None))
             except:  # noqa pylint: disable=bare-except
                 exit_evt.set()
                 raise
@@ -496,27 +500,30 @@ class HalfEmpty(Strategy):
                 chunk_end = len(testcase)
                 while chunk_size > 1:  # smallest valid chunk size is 1
                     chunk_size >>= 1
-                    # To avoid testing with an empty testcase (wasting cycles) only break when
-                    # chunkSize is less than the number of testcase parts available.
+                    # To avoid testing with an empty testcase (wasting cycles) only
+                    # break when chunkSize is less than the number of testcase parts
+                    # available.
                     if chunk_size < len(testcase):
                         break
 
             yield (chunk_size, chunk_end)
 
             # Decrement chunk_size
-            # To ensure the file is fully reduced, decrement chunk_end by 1 when chunk_size <= 2
+            # To ensure the file is fully reduced, decrement chunk_end by 1 when
+            # chunk_size <= 2
             if chunk_size <= 2:
                 chunk_end -= 1
             else:
                 chunk_end -= chunk_size
 
     def _fill_queue(self, work_queue, testcase, current_chunk):
+        num = 0
         # fill the queue with work, assuming every reduction will fail
         for chunk in self._iter_chunks(testcase, current_chunk):
             # testcase is a single object, it isn't copied in the queue
             work_queue.put((testcase, chunk))
-        # add a sentinal item to signal that reduction is complete
-        work_queue.put(None)
+            num += 1
+        return num
 
     def main(self, testcase, interesting, temp_filename):
         work_queue = queue.Queue()
@@ -536,30 +543,66 @@ class HalfEmpty(Strategy):
         )
         monitor.start()
         try:
-            self._fill_queue(work_queue, testcase, None)
+            repeat_last = False
+            last_interesting_bug = False
+            remaining = self._fill_queue(work_queue, testcase, None)
+            log.info("%d attempts remain", remaining)
             while True:
                 if exit_evt.is_set():
                     break
                 try:
-                    result = result_queue.get(timeout=self.thread_check_period)
-                    if result is None:
-                        log.info("reduction finished")
-                        # reduction is finished!
-                        return 0
-                    test_tried, next_chunk = result
+                    test_tried, last_chunk, next_chunk = result_queue.get(
+                        timeout=self.thread_check_period,
+                    )
                     if test_tried is not testcase:
-                        log.info("Removing the chunk and resetting work queue")
+                        log.info("Chunk %r removal was interesting", last_chunk)
                         # wow, it worked!
-                        clear_evt.set()
                         work_queue.join()
-                        try:
-                            result_queue.get_nowait()
-                        except queue.Empty:
-                            pass
+                        clear_evt.clear()
+                        last_interesting_bug = False
+                        while True:
+                            try:
+                                other_test, _, _ = result_queue.get_nowait()
+                                if other_test is not testcase:
+                                    last_interesting_bug = True
+                            except queue.Empty:
+                                break
                         # remove the chunk for real
                         testcase = test_tried
                         # re-fill the queue
-                        self._fill_queue(work_queue, testcase, next_chunk)
+                        remaining = self._fill_queue(work_queue, testcase, next_chunk)
+                        log.info("%d attempts remain", remaining)
+                        chunk_size, _ = last_chunk
+                        if chunk_size == 1:
+                            repeat_last = True
+                    else:
+                        remaining -= 1
+                    if not remaining:
+                        if repeat_last:
+                            repeat_last = False
+                            next_chunk = (1, len(testcase))
+                            remaining = self._fill_queue(
+                                work_queue,
+                                testcase,
+                                next_chunk,
+                            )
+                            if remaining:
+                                log.info(
+                                    "Repeating with chunk size of 1, "
+                                    "%d attempts remain",
+                                    remaining,
+                                )
+                                continue
+                        log.info("Reduction finished")
+                        if last_interesting_bug:
+                            # if the last "interesting" return was from a branch not
+                            # taken (discarded when the result queue was cleared), the
+                            # final testcase could be invalid
+                            log.info(
+                                "Running a final iteration with the finished testcase"
+                            )
+                            assert interesting(testcase)
+                        return 0
                 except queue.Empty:
                     continue
         finally:
